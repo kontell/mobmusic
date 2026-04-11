@@ -1,0 +1,3 @@
+# MobMusic auto-sync rules - managed by mobmusic.py setup
+# Each line triggers a sync service instance when a registered USB device is inserted.
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_UUID}=="FCBF-66F1", TAG+="systemd", ENV{SYSTEMD_WANTS}="mobmusic-sync@FCBF-66F1.service"

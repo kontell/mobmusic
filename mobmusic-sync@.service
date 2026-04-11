@@ -1,0 +1,14 @@
+[Unit]
+Description=MobMusic auto-sync for device %i
+After=udisks2.service
+
+[Service]
+Type=oneshot
+User=conor
+Group=conor
+ExecStartPre=/usr/bin/sleep 3
+ExecStart=/opt/mobmusic/venv/bin/python3 /opt/mobmusic/mobmusic.py auto /dev/disk/by-uuid/%i
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mobmusic
