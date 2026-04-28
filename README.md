@@ -23,6 +23,19 @@ Source library structure is `Artist/Album/tracks`. Album directories can use any
 - Jellyfin server (for playlist sync)
 - Linux with udev + systemd (for auto-sync)
 
+## Installation
+
+The systemd service file assumes the repo lives at `/opt/mobmusic`. Clone there and set up the venv:
+
+```bash
+sudo mkdir -p /opt/mobmusic
+sudo chown $(whoami) /opt/mobmusic
+git clone https://github.com/kontell/mobmusic.git /opt/mobmusic
+cd /opt/mobmusic
+python3 -m venv venv
+venv/bin/pip install ffmpeg-python
+```
+
 ## Usage
 
 ```bash

@@ -21,7 +21,10 @@ Single-file Python CLI (`mobmusic.py`) with four subcommands: `setup`, `sync`, `
 ### Key design decisions
 
 - **exFAT sanitization**: Directory names are stripped of trailing dots/spaces before path construction. exFAT silently strips these, causing path mismatches between constructed and on-disk paths if not handled.
-- **Album year parsing**: Regex `r'(.+?)\s*\((\d{4})\b'` handles extra text after year (e.g., "Album (1965, UK Edition)"). Albums without years are included as-is rather than skipped.
+- **Album year parsing**: Multi-pattern matching handles `Title (YYYY)`, `Title [YYYY]`, `YYYY - Title`, `[YYYY] Title`, `Title - YYYY`. Patterns are tried in order; first match wins. Albums without years are included as-is rather than skipped.
+- **Artist "The" normalization**: `get_artist_display_name` handles both directions: `The Beatles` → `Beatles, The` and idempotent `Beatles, The` → `Beatles, The`. Edge case: `The The` is left as-is (early return when base equals "The"). `artist_initial` is derived from the display name, not the raw source name, so "The Beatles" gets initial "B".
+- **Mtime-based incremental sync**: `process_file` compares source/target mtime instead of just checking existence. Source newer than target triggers re-transcode. Uses `<=` comparison (matching rsync/make convention). FAT32's 2-second mtime granularity is acceptable.
+- **Config validation**: `validate_server_config` and `validate_device_config` collect all errors before reporting, so users can fix everything in one pass. Called from `load_server_config` and `cmd_auto` respectively.
 - **Embedded art**: ffmpeg streams use `.audio` selector to ignore embedded cover art (video streams in FLAC), which would otherwise fail transcoding to m4a containers.
 - **Orphan cleanup**: The expected target path set is built once from `collect_file_tasks()` and shared between sync and orphan cleanup. Never recomputed independently -- avoids path representation mismatches.
 - **Polkit**: `10-mobmusic-mount.rules` grants the `conor` user udisks2 mount/unmount permission without a desktop session (required for headless operation).
@@ -31,6 +34,7 @@ Single-file Python CLI (`mobmusic.py`) with four subcommands: `setup`, `sync`, `
 ```
 mobmusic.py              Main CLI (all logic in one file)
 creds.conf               Server credentials (gitignored)
+creds.conf.example       Template for creds.conf
 99-mobmusic.rules         udev rules (managed by setup subcommand)
 mobmusic-sync@.service    systemd template unit
 10-mobmusic-mount.rules   polkit rule for udisks2
@@ -38,7 +42,7 @@ mobmusic-sync@.service    systemd template unit
 
 ## Dependencies
 
-Python 3.13 venv at `/opt/mobmusic/venv`. Only non-stdlib package is `ffmpeg-python`. Everything else uses stdlib: `urllib.request` (Jellyfin API), `configparser` (config), `smtplib` (email), `concurrent.futures` (parallel transcoding).
+Python 3.13 venv at `/opt/mobmusic/venv`. Only non-stdlib package is `ffmpeg-python`. Everything else uses stdlib: `urllib.request` (Jellyfin API), `configparser` (config), `smtplib` (email), `concurrent.futures` (parallel transcoding), `re` (album/bitrate validation).
 
 FFmpeg: `/usr/lib/jellyfin-ffmpeg/ffmpeg` (has `libfdk_aac`). Falls back to system ffmpeg's built-in `aac` encoder if unavailable.
 
@@ -75,7 +79,9 @@ journalctl -t mobmusic -f
 
 Source: `/media/bluecon/music` (~293 artists, mostly FLAC).
 Structure: `Artist Name/Album Title (Year)/Track.flac`
-Artists with "The" stored as: `Name, The` (e.g., `Beatles, The`).
+Artists with "The" stored as: `Name, The` (e.g., `Beatles, The`). Source libraries using `The Name` format are also supported — normalized automatically.
+
+Supported source formats: FLAC, ALAC (.m4a), APE, WAV, MP3, AAC, OGG, WMA, Opus. All are transcoded to the target codec.
 
 ## Codec options
 
