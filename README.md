@@ -1,18 +1,23 @@
 # MobMusic
 
-Transcodes a FLAC library to lossy formats for portable devices. Syncs Jellyfin playlists as M3U files. Auto-triggers when a registered USB drive is plugged into a headless Debian server.
+Transcodes a music library to lossy formats for portable devices. Syncs Jellyfin playlists as M3U files. Auto-triggers when a registered USB drive is plugged into a headless Debian server.
 
 ## How it works
 
 ```
-Master FLAC library ──> transcode (aac/opus/mp3) ──> USB drive
-Jellyfin playlists  ──> M3U files with rewritten paths ──> USB drive
+Music library ──> transcode (aac/opus/mp3) ──> USB drive
+Jellyfin playlists ──> M3U files with rewritten paths ──> USB drive
 ```
 
-Register a USB device once with `setup`. After that, plugging it in triggers a full sync automatically via udev + systemd: mount, transcode new/changed files, sync playlists, clean orphans, unmount, email notification.
+Source library can contain FLAC, ALAC, APE, WAV, MP3, AAC, OGG, WMA, or Opus files — all are transcoded to the target codec.
+
+Register a USB device once with `setup`. After that, plugging it in triggers a full sync automatically via udev + systemd: mount, transcode new/changed files (mtime-based — re-transcodes when source is updated), sync playlists, clean orphans, unmount, email notification.
+
+Source library structure is `Artist/Album/tracks`. Album directories can use any of these year formats: `Album (1965)`, `Album [1965]`, `1965 - Album`, `[1965] Album`, `Album - 1965`, or no year at all. Artists prefixed with "The" (e.g., `The Beatles`) are automatically normalized to `Beatles, The` in the target.
 
 ## Requirements
 
+- Locally mounted music library (any format ffmpeg can decode)
 - Python 3.13+ with `ffmpeg-python`
 - FFmpeg with `libfdk_aac` (falls back to built-in `aac` if unavailable)
 - Jellyfin server (for playlist sync)
@@ -39,7 +44,13 @@ journalctl -t mobmusic -f
 
 ## Configuration
 
-**Server** (`creds.conf`): Jellyfin URL/API key, SMTP credentials, default source path and FFmpeg location.
+**Server** (`creds.conf`): Jellyfin URL/API key, SMTP credentials, default source path and FFmpeg location. Copy the template and fill in your values:
+
+```bash
+cp creds.conf.example creds.conf
+chmod 600 creds.conf
+# Edit creds.conf with your settings
+```
 
 **Per-device** (`.mobmusic.conf` on USB root): Jellyfin user, email, codec, bitrate, directory structure. Written by `setup`, travels with the device.
 

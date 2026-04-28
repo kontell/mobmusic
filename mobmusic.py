@@ -45,7 +45,7 @@ CODECS = {
     "mp3":  {"encoder": "libmp3lame", "fallback": None,  "ext": ".mp3"},
 }
 
-AUDIO_EXTENSIONS = {"flac", "mp3", "m4a", "ogg", "wav", "wma", "opus", "aac"}
+AUDIO_EXTENSIONS = {"flac", "mp3", "m4a", "ogg", "wav", "wma", "opus", "aac", "ape"}
 IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "bmp", "webp"}
 
 # ---------------------------------------------------------------------------
@@ -59,6 +59,7 @@ def load_server_config():
         sys.exit(1)
     cfg = configparser.ConfigParser()
     cfg.read(CREDS_FILE)
+    validate_server_config(cfg)
     return cfg
 
 
@@ -70,6 +71,68 @@ def load_device_config(mount_point):
     cfg = configparser.ConfigParser()
     cfg.read(conf_path)
     return cfg
+
+
+def validate_server_config(cfg):
+    """Validate server config has all required sections and keys."""
+    required = {
+        "jellyfin": ["server", "api_key"],
+        "smtp": ["host", "port", "from"],
+        "defaults": ["source", "ffmpeg_path"],
+    }
+    missing = []
+    for section, keys in required.items():
+        if not cfg.has_section(section):
+            missing.append(f"[{section}] (entire section)")
+        else:
+            for key in keys:
+                if not cfg.has_option(section, key):
+                    missing.append(f"[{section}] {key}")
+    if missing:
+        print(
+            f"Error: {CREDS_FILE} is missing required config:\n"
+            + "\n".join(f"  - {m}" for m in missing),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+def validate_device_config(cfg, conf_source="device config"):
+    """Validate per-device config has required keys and sane values."""
+    errors = []
+
+    if not cfg.has_section("device"):
+        print(f"Error: {conf_source} is missing [device] section", file=sys.stderr)
+        sys.exit(1)
+
+    for key in ["jellyfin_user", "jellyfin_user_id", "email",
+                "codec", "bitrate", "structure"]:
+        if not cfg.has_option("device", key):
+            errors.append(f"missing key: {key}")
+
+    if cfg.has_option("device", "codec"):
+        codec = cfg.get("device", "codec")
+        if codec not in ("aac", "opus", "mp3"):
+            errors.append(f"codec must be one of aac, opus, mp3 (got '{codec}')")
+
+    if cfg.has_option("device", "structure"):
+        structure = cfg.get("device", "structure")
+        if structure not in ("initial", "mirror"):
+            errors.append(f"structure must be one of initial, mirror (got '{structure}')")
+
+    if cfg.has_option("device", "bitrate"):
+        bitrate = cfg.get("device", "bitrate")
+        if not re.match(r"^\d+k$", bitrate):
+            errors.append(f"bitrate must match pattern like '128k' (got '{bitrate}')")
+
+    if errors:
+        print(
+            f"Error: {conf_source} has invalid [device] config:\n"
+            + "\n".join(f"  - {e}" for e in errors),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -133,21 +196,42 @@ def parse_album_name(album_name):
     Handles:
         "Album Title (1965)"          -> ("1965", "Album Title")
         "Album Title (1965, UK)"      -> ("1965", "Album Title")
+        "Album Title [1965]"          -> ("1965", "Album Title")
+        "1965 - Album Title"          -> ("1965", "Album Title")
+        "[1965] Album Title"          -> ("1965", "Album Title")
+        "Album Title - 1965"          -> ("1965", "Album Title")
         "Blazing Saddles"             -> (None, "Blazing Saddles")
         "B-Sides (1)"                 -> (None, "B-Sides (1)")
     """
-    match = re.match(r"(.+?)\s*\((\d{4})\b", album_name)
-    if match:
-        return match.group(2), match.group(1).rstrip()
+    patterns = [
+        (r"(.+?)\s*\((\d{4})\b", 1, 2),       # Title (YYYY...)
+        (r"(.+?)\s*\[(\d{4})\]", 1, 2),        # Title [YYYY]
+        (r"^(\d{4})\s*-\s*(.+)$", 2, 1),       # YYYY - Title
+        (r"^\[(\d{4})\]\s*(.+)$", 2, 1),       # [YYYY] Title
+        (r"^(.+?)\s*-\s*(\d{4})$", 1, 2),      # Title - YYYY
+    ]
+    for pattern, title_group, year_group in patterns:
+        match = re.match(pattern, album_name)
+        if match:
+            return match.group(year_group), match.group(title_group).strip()
     return None, album_name
 
 
 def get_artist_display_name(artist_name):
-    """Normalise 'Name, The' style artist names.
+    """Normalise artist names with 'The' to 'Name, The' format.
 
-    Source dirs already use 'Name, The' format. This function is idempotent:
-    it strips a trailing 'The' (with optional comma/space) and re-adds ', The'.
+    Handles both directions:
+        "The Beatles"   -> "Beatles, The"
+        "Beatles, The"  -> "Beatles, The"
+        "Beatles The"   -> "Beatles, The"
+        "The The"       -> "The The"
+        "Radiohead"     -> "Radiohead"
     """
+    if artist_name.startswith("The ") and len(artist_name) > 4:
+        base = artist_name[4:]
+        if base and base != "The":
+            return f"{base}, The"
+        return artist_name
     if artist_name.endswith("The") and len(artist_name) > 3:
         base = artist_name[:-3].rstrip(", ")
         if base:
@@ -170,7 +254,7 @@ def build_target_album_path(target_root, artist_name, album_name, structure):
     """Build the target directory for an album based on the structure mode."""
     if structure == "initial":
         display = sanitize_exfat(get_artist_display_name(artist_name))
-        initial = artist_initial(artist_name)
+        initial = artist_initial(display)
         year, title = parse_album_name(album_name)
         album_dir = sanitize_exfat(f"{year} - {title}" if year else title)
         return Path(target_root) / initial / display / album_dir
@@ -195,7 +279,7 @@ def transform_playlist_path(master_path, source_root, structure, codec_ext):
 
         if structure == "initial":
             display = sanitize_exfat(get_artist_display_name(artist))
-            initial = artist_initial(artist)
+            initial = artist_initial(display)
             year, title = parse_album_name(album)
             album_dir = sanitize_exfat(f"{year} - {title}" if year else title)
             mobile_parts = [initial, display, album_dir] + rest
@@ -226,6 +310,7 @@ class SyncResult:
         self.bitrate = bitrate
         self.structure = structure
         self.transcoded = 0
+        self.updated = 0
         self.copied = 0
         self.skipped = 0
         self.deleted = 0
@@ -240,8 +325,14 @@ def process_file(src_file, target_file, ext, encoder, bitrate, ffmpeg_path):
     target_path = Path(target_file)
     target_path.parent.mkdir(parents=True, exist_ok=True)
 
+    is_update = False
     if target_path.exists():
-        return "skipped"
+        try:
+            if src_path.stat().st_mtime <= target_path.stat().st_mtime:
+                return "skipped"
+        except OSError:
+            return "skipped"
+        is_update = True
 
     if not src_path.exists():
         logging.error(f"Source file does not exist: {src_file}")
@@ -250,6 +341,9 @@ def process_file(src_file, target_file, ext, encoder, bitrate, ffmpeg_path):
     if ext in IMAGE_EXTENSIONS:
         try:
             shutil.copy2(str(src_file), str(target_file))
+            if is_update:
+                logging.info(f"Updated: {target_file}")
+                return "updated"
             logging.info(f"Copied: {target_file}")
             return "copied"
         except (shutil.Error, OSError) as e:
@@ -267,6 +361,9 @@ def process_file(src_file, target_file, ext, encoder, bitrate, ffmpeg_path):
                 map_metadata=0,
             )
             ffmpeg.run(stream, cmd=ffmpeg_path, overwrite_output=True, quiet=True)
+            if is_update:
+                logging.info(f"Updated: {target_file}")
+                return "updated"
             logging.info(f"Transcoded: {target_file}")
             return "transcoded"
         except ffmpeg.Error as e:
@@ -413,7 +510,14 @@ def cmd_sync(args, server_cfg):
     if dry_run:
         for src, tgt, ext in file_tasks:
             if tgt.exists():
-                result.skipped += 1
+                try:
+                    if src.stat().st_mtime > tgt.stat().st_mtime:
+                        logging.info(f"Would update: {src} -> {tgt}")
+                        result.updated += 1
+                    else:
+                        result.skipped += 1
+                except OSError:
+                    result.skipped += 1
             elif ext in AUDIO_EXTENSIONS:
                 logging.info(f"Would transcode: {src} -> {tgt}")
                 result.transcoded += 1
@@ -422,8 +526,8 @@ def cmd_sync(args, server_cfg):
                 result.copied += 1
         orphans = clean_orphans(target, expected_targets, dry_run=True)
         logging.info(f"Dry run complete: {result.transcoded} to transcode, "
-                     f"{result.copied} to copy, {result.skipped} already exist, "
-                     f"{orphans} orphans to delete")
+                     f"{result.updated} to update, {result.copied} to copy, "
+                     f"{result.skipped} already exist, {orphans} orphans to delete")
         return result
 
     processed = 0
@@ -439,6 +543,8 @@ def cmd_sync(args, server_cfg):
                 status = future.result()
                 if status == "transcoded":
                     result.transcoded += 1
+                elif status == "updated":
+                    result.updated += 1
                 elif status == "copied":
                     result.copied += 1
                 elif status == "skipped":
@@ -461,9 +567,9 @@ def cmd_sync(args, server_cfg):
     result.elapsed = str(elapsed).split(".")[0]
     logging.info(
         f"Sync complete in {result.elapsed}: "
-        f"{result.transcoded} transcoded, {result.copied} copied, "
-        f"{result.skipped} skipped, {result.deleted} orphans deleted, "
-        f"{result.errors} errors"
+        f"{result.transcoded} transcoded, {result.updated} updated, "
+        f"{result.copied} copied, {result.skipped} skipped, "
+        f"{result.deleted} orphans deleted, {result.errors} errors"
     )
     return result
 
@@ -608,7 +714,8 @@ def send_notification(sync_result, playlist_result, device_email, server_cfg):
 
     subject = (
         f"MobMusic sync complete - "
-        f"{sync_result.transcoded} transcoded, {sync_result.errors} errors"
+        f"{sync_result.transcoded} transcoded, {sync_result.updated} updated, "
+        f"{sync_result.errors} errors"
     )
 
     body = f"""MobMusic sync completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -621,6 +728,7 @@ Library sync:
   Codec: {sync_result.codec} @ {sync_result.bitrate}
   Structure: {sync_result.structure}
   Files transcoded: {sync_result.transcoded}
+  Files updated: {sync_result.updated}
   Files copied (images): {sync_result.copied}
   Files skipped (existing): {sync_result.skipped}
   Orphans deleted: {sync_result.deleted}
@@ -911,6 +1019,8 @@ def cmd_auto(args, server_cfg):
             )
             sys.exit(1)
 
+        validate_device_config(dev_cfg, f".mobmusic.conf on {mount_point}")
+
         device = dev_cfg["device"]
         codec = device.get("codec", "aac")
         bitrate = device.get("bitrate", "128k")
@@ -957,6 +1067,8 @@ def cmd_auto(args, server_cfg):
                     status = future.result()
                     if status == "transcoded":
                         sync_result.transcoded += 1
+                    elif status == "updated":
+                        sync_result.updated += 1
                     elif status == "copied":
                         sync_result.copied += 1
                     elif status == "skipped":

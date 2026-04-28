@@ -1,0 +1,15 @@
+[jellyfin]
+server = http://localhost:8096
+api_key = your-jellyfin-api-key
+
+[smtp]
+host = localhost
+port = 587
+user =
+pass =
+from = mobmusic@example.com
+
+[defaults]
+source = /path/to/music/library
+ffmpeg_path = /usr/bin/ffmpeg
+max_threads = 8
