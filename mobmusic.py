@@ -48,6 +48,12 @@ CODECS = {
 AUDIO_EXTENSIONS = {"flac", "mp3", "m4a", "ogg", "wav", "wma", "opus", "aac", "ape"}
 IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "bmp", "webp"}
 
+# Mtime comparison tolerance, in seconds (rsync's --modify-window). FAT/exFAT
+# store timestamps at 2-second resolution and truncate, so a copied file's
+# preserved mtime lands just before the source's. Without this slack, every
+# such file looks "newer at source" and re-copies on every sync.
+MTIME_SLACK = 2
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
@@ -245,9 +251,16 @@ def artist_initial(artist_name):
     return ch if ch.isalpha() else "#"
 
 
+# Characters exFAT/FAT reject in filenames. Includes the path separators so a
+# name like "AC/DC" collapses to one component instead of fragmenting into dirs.
+INVALID_EXFAT_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
 def sanitize_exfat(name):
-    """Strip trailing dots and spaces from names — exFAT silently removes them."""
-    return name.rstrip(". ")
+    """Make a name safe for exFAT/FAT: replace reserved characters with '_',
+    then strip trailing dots and spaces, which exFAT silently removes."""
+    cleaned = INVALID_EXFAT_CHARS.sub("_", name).rstrip(". ")
+    return cleaned or "_"
 
 
 def build_target_album_path(target_root, artist_name, album_name, structure):
@@ -275,7 +288,7 @@ def transform_playlist_path(master_path, source_root, structure, codec_ext):
 
         artist = parts[0]
         album = parts[1]
-        rest = parts[2:]  # track file, possibly with disc subdir
+        rest = [sanitize_exfat(p) for p in parts[2:]]  # track file, possibly with disc subdir
 
         if structure == "initial":
             display = sanitize_exfat(get_artist_display_name(artist))
@@ -328,7 +341,7 @@ def process_file(src_file, target_file, ext, encoder, bitrate, ffmpeg_path):
     is_update = False
     if target_path.exists():
         try:
-            if src_path.stat().st_mtime <= target_path.stat().st_mtime:
+            if src_path.stat().st_mtime <= target_path.stat().st_mtime + MTIME_SLACK:
                 return "skipped"
         except OSError:
             return "skipped"
@@ -407,7 +420,9 @@ def collect_file_tasks(source_root, target_root, structure, codec_ext):
                     continue
 
                 rel_path = src_file.relative_to(album_dir)
-                target_file = target_album / rel_path
+                target_file = target_album.joinpath(
+                    *[sanitize_exfat(p) for p in rel_path.parts]
+                )
 
                 if ext in AUDIO_EXTENSIONS:
                     target_file = target_file.with_suffix(codec_ext)
@@ -511,7 +526,7 @@ def cmd_sync(args, server_cfg):
         for src, tgt, ext in file_tasks:
             if tgt.exists():
                 try:
-                    if src.stat().st_mtime > tgt.stat().st_mtime:
+                    if src.stat().st_mtime > tgt.stat().st_mtime + MTIME_SLACK:
                         logging.info(f"Would update: {src} -> {tgt}")
                         result.updated += 1
                     else:
@@ -642,7 +657,7 @@ def sync_playlists(target, source, structure, codec, user_id, server_cfg):
             result.errors += 1
             continue
 
-        m3u_path = playlist_dir / f"{name}.m3u"
+        m3u_path = playlist_dir / f"{sanitize_exfat(name)}.m3u"
         track_count = 0
 
         with open(m3u_path, "w", encoding="utf-8") as f:
